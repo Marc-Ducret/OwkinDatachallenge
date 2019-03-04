@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import tqdm
 import parse
+import keras
 
 n_tiles = 1000
 n_resnet_features = 2048
@@ -49,38 +50,98 @@ def load_labels(folder, ids):
     return np.array(labels)
 
 
-def load_tile_annotations(folder, reverse_ids, mask, annotated):
+def load_tile_annotations(folder, reverse_ids, annotated):
     tile_annotations = pd.read_csv('{}/tile_annotations.csv'.format(folder))
-    annotations = {}
+    annotations = - np.ones(annotated.shape + (n_tiles,))
     for _, annotation in tile_annotations.iterrows():
         image, label = annotation['Image'], annotation['Target']
         patient_id, tile_id, _ = parse.parse('ID_{:03d}_annotated_tile_{:d}_{}', image)
 
-        if patient_id not in annotations:
-            assert patient_id in reverse_ids
-            assert annotated[reverse_ids[patient_id]]
-            annotations[patient_id] = -np.ones(n_tiles)
+        assert patient_id in reverse_ids
+        assert annotated[reverse_ids[patient_id]]
 
-        annotations[patient_id][tile_id] = label
+        annotations[reverse_ids[patient_id]][tile_id] = label
 
     for patient_id in reverse_ids:
         if annotated[reverse_ids[patient_id]]:
             assert patient_id in annotations
-            assert (annotations[patient_id][mask[reverse_ids[patient_id]]] >= 0).all()
 
     return annotations
 
 
-def generator(data_folder):
-    # TODO images, validation, batching, testing
+class DataLoader(keras.utils.Sequence):
+    # TODO implement image loading
+    def __init__(self, folder, ids, annotated, labels=None, annotations=None, batch_size=32):
+        self.folder = folder
+        self.ids = ids
+        self.annotated = annotated
+        self.batch_size = batch_size
+        self.labels = labels
+        self.annotations = annotations
+        self.permutation = np.arange(len(self.ids))
+        self.on_epoch_end()
 
-    train_folder = '{}/train'.format(data_folder)
-    ids, annotated, reverse_ids = explore_dataset(train_folder)
-    features, mask = load_resnet_features(train_folder, ids, annotated)
+    def __len__(self):
+        return len(self.ids) // self.batch_size
 
-    labels = load_labels(train_folder, ids)
-    annotations = load_tile_annotations(train_folder, reverse_ids, mask, annotated)
+    def __getitem__(self, item):
+        select = self.permutation[item * self.batch_size : (item+1) * self.batch_size]
+
+        features, masks = load_resnet_features(self.folder, self.ids[select], self.annotated[select])
+
+        if self.labels is not None:
+            return features, masks, self.labels[select], self.annotations[select]
+        else:
+            return features, masks
+
+    def on_epoch_end(self):
+        np.random.shuffle(self.permutation)
+
+
+def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0,
+                 train_batch_size=32, validation_batch_size=32):
+
+    ids, annotated, reverse_ids = explore_dataset(folder)
+
+    labels = load_labels(folder, ids)
+    annotations = load_tile_annotations(folder, reverse_ids, annotated)
+
+    validation_count = int(validation_ratio * ids.size)
+    validation_annotated_count = int(validation_annotated_ratio * ids.size)
+
+    assert validation_annotated_count <= validation_count
+    assert validation_count <= ids.size
+
+    permutation = np.arange(ids.size)
+    np.random.shuffle(permutation)
+
+    train_select = []
+    validation_select = []
+    validation_annotated_selected = 0
+
+    for i in permutation:
+        if len(validation_select) < validation_count and (
+                validation_annotated_selected < validation_annotated_count or not annotated[i]):
+            validation_select.append(ids[i])
+            validation_annotated_selected += annotated[i]
+        else:
+            train_select.append(ids[i])
+
+    train_select = np.array(train_select)
+    validation_select = np.array(validation_select)
+
+    return (
+        DataLoader(folder, ids[train_select], annotated[train_select],
+                   labels[train_select], annotations[train_select], batch_size=train_batch_size),
+        DataLoader(folder, ids[validation_select], annotated[validation_select],
+                   labels[validation_select], annotations[validation_select], batch_size=validation_batch_size),
+    )
+
+
+def test_loader(folder, batch_size):
+    ids, annotated, reverse_ids = explore_dataset(folder)
+    return DataLoader(folder, ids, annotated, batch_size=batch_size)
 
 
 if __name__ == '__main__':
-    generator('../data')
+    pass
