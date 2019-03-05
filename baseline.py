@@ -53,10 +53,10 @@ def main():
     # Load the data
     assert args.data_dir.is_dir()
 
-    train_dir = args.data_dir / "train_input" / "resnet_features"
-    test_dir = args.data_dir / "test_input" / "resnet_features"
+    train_dir = args.data_dir / "train" / "resnet_features"
+    test_dir = args.data_dir / "test" / "resnet_features"
 
-    train_output_filename = args.data_dir / "train_output.csv"
+    train_output_filename = args.data_dir / "train" / "labels.csv"
 
     train_output = pd.read_csv(train_output_filename)
 
