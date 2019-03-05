@@ -133,6 +133,8 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0,
     train_select = np.array(train_select)
     validation_select = np.array(validation_select)
 
+    print('train size: {}, validation size: {}'.format(train_select.size, validation_select.size))
+
     return (
         DataLoader(folder, ids[train_select], annotated[train_select],
                    labels[train_select], annotations[train_select], batch_size=train_batch_size,
