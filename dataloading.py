@@ -4,9 +4,7 @@ import os
 import tqdm
 import parse
 import keras
-
-n_tiles = 1000
-n_resnet_features = 2048
+from constants import *
 
 
 def time(f, *args, **kwargs):
@@ -35,7 +33,7 @@ def load_resnet_features(folder, ids, annotated):
     features = np.zeros(ids.shape + (n_tiles, n_resnet_features))
     mask = np.zeros(ids.shape + (n_tiles,), dtype=bool)
 
-    for i in tqdm.trange(ids.shape[0]):
+    for i in range(ids.shape[0]):
         file = '{}/resnet_features/ID_{:03d}{}.npy'.format(folder, ids[i], '_annotated' if annotated[i] else '')
         loaded = np.load(file)[:, -n_resnet_features:]
         features[i, :loaded.shape[0]] = loaded
@@ -47,7 +45,7 @@ def load_resnet_features(folder, ids, annotated):
 def load_labels(folder, ids):
     labels = pd.read_csv('{}/labels.csv'.format(folder))
     assert np.all(labels['ID'] == ids)
-    return np.array(labels)
+    return np.array(labels['Target'])
 
 
 def load_tile_annotations(folder, reverse_ids, annotated):
@@ -61,10 +59,6 @@ def load_tile_annotations(folder, reverse_ids, annotated):
         assert annotated[reverse_ids[patient_id]]
 
         annotations[reverse_ids[patient_id]][tile_id] = label
-
-    for patient_id in reverse_ids:
-        if annotated[reverse_ids[patient_id]]:
-            assert patient_id in annotations
 
     return annotations
 
@@ -82,17 +76,17 @@ class DataLoader(keras.utils.Sequence):
         self.on_epoch_end()
 
     def __len__(self):
-        return len(self.ids) // self.batch_size
+        return (len(self.ids)+self.batch_size-1) // self.batch_size
 
     def __getitem__(self, item):
-        select = self.permutation[item * self.batch_size : (item+1) * self.batch_size]
+        select = self.permutation[item * self.batch_size:(item+1) * self.batch_size]
 
         features, masks = load_resnet_features(self.folder, self.ids[select], self.annotated[select])
 
         if self.labels is not None:
-            return features, masks, self.labels[select], self.annotations[select]
+            return [features, masks], [self.labels[select], self.annotations[select]]
         else:
-            return features, masks
+            return [features, masks]
 
     def on_epoch_end(self):
         np.random.shuffle(self.permutation)
@@ -122,10 +116,10 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0,
     for i in permutation:
         if len(validation_select) < validation_count and (
                 validation_annotated_selected < validation_annotated_count or not annotated[i]):
-            validation_select.append(ids[i])
+            validation_select.append(i)
             validation_annotated_selected += annotated[i]
         else:
-            train_select.append(ids[i])
+            train_select.append(i)
 
     train_select = np.array(train_select)
     validation_select = np.array(validation_select)
