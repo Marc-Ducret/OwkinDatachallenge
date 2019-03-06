@@ -8,7 +8,8 @@ from keras.layers import *
 import dataloading
 import os
 import pandas as pd
-import sklearn
+from sklearn.metrics import roc_auc_score
+import tqdm
 
 
 def Sum(axis, keepdims=False):
@@ -36,7 +37,11 @@ def global_model(tile_shape, local_model):
         Multiply()([
             Sum(axis=1, keepdims=True)(
                 Multiply()([
-                    Reshape((n_tiles,))(Dense(1, activation='relu', kernel_initializer='ones')(local_model_output)),
+                    Reshape((n_tiles,))(
+                        LeakyReLU(.1)(
+                            Dense(1, kernel_initializer='ones')(local_model_output)
+                        )
+                    ),
                     masks
                 ])
             ),
@@ -73,10 +78,10 @@ def predict_test(model, name):
 
 def auc_callback(model, validation):
     def compute_auc(epoch, logs):
-        if len(validation) > 0:
+        if validation is not None:
             pred, _ = model.predict_generator(validation)
             pred = 1 / (1 + np.exp(-pred))
-            logs['auc'] = sklearn.metrics.roc_auc_score(validation.labels, pred)
+            logs['auc'] = roc_auc_score(validation.labels, np.floor(pred * 1e4) / 1e4)
         else:
             logs['auc'] = 0
         print('Epoch {:02d} | auc: {:.2f}'.format(epoch+1, logs['auc']))
@@ -112,7 +117,7 @@ def train_model():
                   )
     )
 
-    train, validation = dataloading.train_loader('../data/train', validation_ratio=.2,
+    train, validation = dataloading.train_loader('../data/train', validation_ratio=0,
                                                  train_batch_size=8, validation_batch_size=512)
 
     model_name = 'model_{:02d}'.format(len(os.listdir('../tensorboard')))
@@ -129,5 +134,49 @@ def train_model():
     return model, model_name
 
 
+def one_vs_all_validation():
+    pred = np.zeros(279)
+    for i in tqdm.trange(279):
+        model = global_model((n_resnet_features,),
+                             keras.Sequential((
+                                 Dropout(.5),
+                                 Dense(8),
+                                 LeakyReLU(),
+                                 Dropout(.5),
+                                 Dense(16),
+                                 LeakyReLU(),
+                                 Dropout(.5),
+                                 Dense(32),
+                                 LeakyReLU(),
+                                 Dropout(.5),
+                                 Dense(1),
+                             ), name='local_model')
+                             )
+        model.compile(keras.optimizers.Adam(lr=2e-3, decay=1e-3),
+                      loss=dict(
+                          prediction=annotation_criterion,
+                          tile_predictions=annotation_criterion
+                      ),
+                      loss_weights=dict(
+                          prediction=1,
+                          tile_predictions=1e1
+                      )
+                      )
+
+        train, validation = dataloading.train_loader('../data/train', one_vs_all=1,
+                                                     train_batch_size=8, validation_batch_size=1)
+
+        model.fit_generator(train,
+                            callbacks=[
+                                keras.callbacks.ReduceLROnPlateau(verbose=0, monitor='loss')],
+                            epochs=20, verbose=0)
+
+        pred[i], _ = model.predict_generator(validation)
+        pred[i] = 1 / (1 + np.exp(-pred[i]))
+    train, _ = dataloading.train_loader('../data/train', train_batch_size=512)
+    print(roc_auc_score(train.labels, pred))
+
+
 if __name__ == '__main__':
     predict_test(*train_model())
+    # one_vs_all_validation()

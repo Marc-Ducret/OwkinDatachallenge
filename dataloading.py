@@ -127,7 +127,6 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, one_v
         permutation = np.arange(ids.size)
         np.random.shuffle(permutation)
 
-
         validation_annotated_selected = 0
 
         for i in permutation:
@@ -138,10 +137,11 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, one_v
             else:
                 train_select.append(i)
 
-    train_select = np.array(train_select)
-    validation_select = np.array(validation_select)
+    train_select = np.array(sorted(train_select))
+    validation_select = np.array(sorted(validation_select))
 
-    print('train size: {}, validation size: {}'.format(train_select.size, validation_select.size))
+    if one_vs_all is None:
+        print('train size: {}, validation size: {}'.format(train_select.size, validation_select.size))
 
     return (
         DataLoader(folder, ids[train_select], annotated[train_select],
@@ -149,11 +149,9 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, one_v
                    preload=False, shuffle=shuffle_train),
         DataLoader(folder, ids[validation_select], annotated[validation_select],
                    labels[validation_select], annotations[validation_select], batch_size=validation_batch_size,
-                   preload=False),
+                   preload=False)
+        if validation_select.size > 0 else None,
     )
-
-
-
 
 
 def test_loader(folder, batch_size):
