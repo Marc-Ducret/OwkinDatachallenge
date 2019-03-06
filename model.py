@@ -1,11 +1,11 @@
+from constants import *
 import numpy as np
-np.random.seed(113)
+np.random.seed(seed)
 import tensorflow
-tensorflow.set_random_seed(113)
+tensorflow.set_random_seed(seed)
 import keras
 from keras.layers import *
 import dataloading
-from constants import *
 import os
 import pandas as pd
 import sklearn
@@ -79,15 +79,29 @@ def auc_callback(model, validation):
             logs['auc'] = sklearn.metrics.roc_auc_score(validation.labels, pred)
         else:
             logs['auc'] = 0
-        print('Epoch {:02d} | auc: {:.2f}'.format(epoch, logs['auc']))
+        print('Epoch {:02d} | auc: {:.2f}'.format(epoch+1, logs['auc']))
     return compute_auc
 
 
 def train_model():
-    model = global_model((n_resnet_features,), keras.layers.Dense(1, name='local_model'))
+    model = global_model((n_resnet_features,),
+                         keras.Sequential((
+                            Dropout(.5),
+                            Dense(8),
+                            LeakyReLU(),
+                            Dropout(.5),
+                            Dense(16),
+                            LeakyReLU(),
+                            Dropout(.5),
+                            Dense(32),
+                            LeakyReLU(),
+                            Dropout(.5),
+                            Dense(1),
+                         ), name='local_model')
+    )
     model.summary()
 
-    model.compile(keras.optimizers.Adam(lr=2e-3, decay=5e-3),
+    model.compile(keras.optimizers.Adam(lr=2e-3, decay=1e-3),
                   loss=dict(
                       prediction=annotation_criterion,
                       tile_predictions=annotation_criterion
@@ -110,9 +124,8 @@ def train_model():
                             keras.callbacks.ReduceLROnPlateau(verbose=1, monitor='loss'),
                             keras.callbacks.TensorBoard(
                                 log_dir='../tensorboard/{}'.format(model_name))],
-                        epochs=60, verbose=0)
+                        epochs=20, verbose=0)
     model.save('../models/{}.h5'.format(model_name))
-
     return model, model_name
 
 

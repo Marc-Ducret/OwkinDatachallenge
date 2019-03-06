@@ -101,7 +101,7 @@ class DataLoader(keras.utils.Sequence):
             np.random.shuffle(self.permutation)
 
 
-def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0,
+def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, one_vs_all=None,
                  train_batch_size=32, validation_batch_size=32, shuffle_train=True):
 
     ids, annotated, reverse_ids = explore_dataset(folder)
@@ -109,26 +109,34 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0,
     labels = load_labels(folder, ids)
     annotations = load_tile_annotations(folder, reverse_ids, annotated)
 
-    validation_count = int(validation_ratio * ids.size)
-    validation_annotated_count = int(validation_annotated_ratio * ids.size)
-
-    assert validation_annotated_count <= validation_count
-    assert validation_count <= ids.size
-
-    permutation = np.arange(ids.size)
-    np.random.shuffle(permutation)
-
     train_select = []
     validation_select = []
-    validation_annotated_selected = 0
+    if one_vs_all is not None:
+        for i in range(ids.size):
+            if i == one_vs_all:
+                validation_select.append(i)
+            else:
+                train_select.append(i)
+    else:
+        validation_count = int(validation_ratio * ids.size)
+        validation_annotated_count = int(validation_annotated_ratio * ids.size)
 
-    for i in permutation:
-        if len(validation_select) < validation_count and (
-                validation_annotated_selected < validation_annotated_count or not annotated[i]):
-            validation_select.append(i)
-            validation_annotated_selected += annotated[i]
-        else:
-            train_select.append(i)
+        assert validation_annotated_count <= validation_count
+        assert validation_count <= ids.size
+
+        permutation = np.arange(ids.size)
+        np.random.shuffle(permutation)
+
+
+        validation_annotated_selected = 0
+
+        for i in permutation:
+            if len(validation_select) < validation_count and (
+                    validation_annotated_selected < validation_annotated_count or not annotated[i]):
+                validation_select.append(i)
+                validation_annotated_selected += annotated[i]
+            else:
+                train_select.append(i)
 
     train_select = np.array(train_select)
     validation_select = np.array(validation_select)
@@ -143,6 +151,9 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0,
                    labels[validation_select], annotations[validation_select], batch_size=validation_batch_size,
                    preload=False),
     )
+
+
+
 
 
 def test_loader(folder, batch_size):
