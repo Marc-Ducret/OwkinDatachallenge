@@ -5,6 +5,7 @@ import tqdm
 import parse
 import keras
 from constants import *
+# from PIL import Image
 
 
 def time(f, *args, **kwargs):
@@ -42,6 +43,10 @@ def load_resnet_features(folder, ids, annotated):
     return features, mask
 
 
+def load_images(folder, ids, annotated):
+    pass  # TODO
+
+
 def load_labels(folder, ids):
     labels = pd.read_csv('{}/labels.csv'.format(folder))
     assert np.all(labels['ID'] == ids)
@@ -66,17 +71,27 @@ def load_tile_annotations(folder, reverse_ids, annotated):
 class DataLoader(keras.utils.Sequence):
     # TODO implement image loading
     def __init__(self, folder, ids, annotated, labels=None, annotations=None, batch_size=32,
-                 preload=False, shuffle=False):
+                 preload=False, shuffle=False, image=False):
         self.folder = folder
         self.ids = ids
         self.annotated = annotated
         self.batch_size = batch_size
         self.labels = labels
         self.annotations = annotations
+
+        if labels is not None:
+            self.label_ratio = (labels == 1).sum() / (labels >= 0).sum()
+            print((annotations == 1).sum(), (annotations >= 0).sum())
+            self.annotation_ratio = (annotations == 1).sum() / (annotations >= 0).sum() \
+                if (annotations >= 0).any() else \
+                0
+
         self.preload = preload
         if self.preload:
             self.features, self.masks = load_resnet_features(folder, ids, annotated)
+
         self.shuffle = shuffle
+        self.image = image
         self.permutation = np.arange(len(self.ids))
         self.on_epoch_end()
 
@@ -86,22 +101,25 @@ class DataLoader(keras.utils.Sequence):
     def __getitem__(self, item):
         select = self.permutation[item * self.batch_size:(item+1) * self.batch_size]
 
-        if self.preload:
-            feature, mask = self.features[select], self.masks[select]
+        if self.image:
+            data, mask = load_images(self.folder, self.ids[select], self.annotated[select])
         else:
-            feature, mask = load_resnet_features(self.folder, self.ids[select], self.annotated[select])
+            if self.preload:
+                data, mask = self.features[select], self.masks[select]
+            else:
+                data, mask = load_resnet_features(self.folder, self.ids[select], self.annotated[select])
 
         if self.labels is not None:
-            return [feature, mask], [self.labels[select], self.annotations[select]]
+            return [data, mask], [self.labels[select], self.annotations[select]]
         else:
-            return [feature, mask]
+            return [data, mask]
 
     def on_epoch_end(self):
         if self.shuffle:
             np.random.shuffle(self.permutation)
 
 
-def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, one_vs_all=None,
+def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, cross_val=None,
                  train_batch_size=32, validation_batch_size=32, shuffle_train=True):
 
     ids, annotated, reverse_ids = explore_dataset(folder)
@@ -109,11 +127,13 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, one_v
     labels = load_labels(folder, ids)
     annotations = load_tile_annotations(folder, reverse_ids, annotated)
 
+    annotations[labels == 0] = 0
+
     train_select = []
     validation_select = []
-    if one_vs_all is not None:
+    if cross_val is not None:
         for i in range(ids.size):
-            if i == one_vs_all:
+            if i in cross_val:
                 validation_select.append(i)
             else:
                 train_select.append(i)
@@ -140,8 +160,11 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, one_v
     train_select = np.array(sorted(train_select))
     validation_select = np.array(sorted(validation_select))
 
-    if one_vs_all is None:
+    if cross_val is None:
         print('train size: {}, validation size: {}'.format(train_select.size, validation_select.size))
+
+    for i in train_select:
+        assert i not in validation_select
 
     return (
         DataLoader(folder, ids[train_select], annotated[train_select],

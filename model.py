@@ -34,15 +34,15 @@ def global_model(tile_shape, local_model):
     tile_predictions = Multiply(name='tile_predictions')([tile_predictions, masks])
 
     prediction = Dense(1, name='prediction', kernel_initializer='ones')(
+
         Multiply()([
             Sum(axis=1, keepdims=True)(
                 Multiply()([
-                    Reshape((n_tiles,))(
-                        LeakyReLU(.1)(
-                            Dense(1, kernel_initializer='ones')(local_model_output)
-                        )
-                    ),
-                    masks
+                    keras.Sequential(layers=(
+                        Dense(1, activation='relu', kernel_initializer='ones'),
+                        Dropout(.1),
+                    ))(local_model_output),
+                    Reshape((n_tiles, 1))(masks)
                 ])
             ),
             Power(-1)(Sum(axis=1, keepdims=True)(masks))
@@ -52,16 +52,14 @@ def global_model(tile_shape, local_model):
     return keras.Model(inputs=[tiles, masks], outputs=[prediction, tile_predictions])
 
 
-def annotation_criterion(target, pred):
-    annotated = K.cast(K.greater_equal(target, 0), float)
-    return K.binary_crossentropy(target * annotated, pred * annotated - 1e10 * (1 - annotated), from_logits=True)
+def balanced_criterion(ratio):
 
+    def criterion(target, pred):
+        valid = K.cast(K.greater_equal(target, 0), float)
+        return 2 * K.abs(target - ratio) * K.binary_crossentropy(target * valid, pred * valid - 1e10 * (1 - valid),
+                                                                 from_logits=True)
 
-def roc_auc(target, pred):
-    mask = K.equal(target[:, None], 1) & K.equal(target[None, :], 0)
-    mask = K.cast(mask, float)
-    greater = K.cast(K.greater(pred[:, None], pred[None, :]), float)
-    return K.sum(greater * mask) / (K.sum(mask) + 1e-5)
+    return criterion
 
 
 def predict_test(model, name):
@@ -81,102 +79,98 @@ def auc_callback(model, validation):
         if validation is not None:
             pred, _ = model.predict_generator(validation)
             pred = 1 / (1 + np.exp(-pred))
-            logs['auc'] = roc_auc_score(validation.labels, np.floor(pred * 1e4) / 1e4)
+            logs['auc'] = roc_auc_score(validation.labels.reshape(-1), pred.reshape(-1))
         else:
             logs['auc'] = 0
         print('Epoch {:02d} | auc: {:.2f}'.format(epoch+1, logs['auc']))
     return compute_auc
 
 
-def train_model():
+def make_model(label_ratio, annotation_ratio):
     model = global_model((n_resnet_features,),
                          keras.Sequential((
-                            Dropout(.5),
-                            Dense(8),
-                            LeakyReLU(),
-                            Dropout(.5),
-                            Dense(16),
-                            LeakyReLU(),
-                            Dropout(.5),
-                            Dense(32),
-                            LeakyReLU(),
-                            Dropout(.5),
-                            Dense(1),
+                             Dropout(.5),
+                             Dense(8),
+                             LeakyReLU(.01),
+                             Dropout(.5),
+                             Dense(16),
+                             LeakyReLU(.01),
+                             Dropout(.5),
+                             Dense(32),
+                             LeakyReLU(.01),
+                             Dropout(.5),
+                             # Dense(32),
+                             # LeakyReLU(.01),
+                             # Dropout(.5),
+                             Dense(1),
                          ), name='local_model')
-    )
-    model.summary()
+                         )
 
     model.compile(keras.optimizers.Adam(lr=2e-3, decay=1e-3),
                   loss=dict(
-                      prediction=annotation_criterion,
-                      tile_predictions=annotation_criterion
+                      prediction=balanced_criterion(label_ratio),
+                      tile_predictions=balanced_criterion(annotation_ratio)
                   ),
                   loss_weights=dict(
                       prediction=1,
-                      tile_predictions=1e1
+                      tile_predictions=5e1
+                  ),
+                  metrics=dict(
+                      prediction=[],
+                      tile_predictions=[]
                   )
-    )
+                  )
+    return model
 
-    train, validation = dataloading.train_loader('../data/train', validation_ratio=0,
+
+def train_model():
+    train, validation = dataloading.train_loader('../data/train',
+                                                 validation_ratio=.2,
+                                                 # cross_val=hard_samples,
                                                  train_batch_size=8, validation_batch_size=512)
 
+    model = make_model(train.label_ratio, train.annotation_ratio)
+    model.summary()
+
     model_name = 'model_{:02d}'.format(len(os.listdir('../tensorboard')))
-    model.fit_generator(train,
+    model.fit_generator(train, validation_data=validation,
                         callbacks=[
-                            keras.callbacks.LambdaCallback(
-                              on_epoch_end=auc_callback(model, validation)
-                            ),
+                            keras.callbacks.LambdaCallback(on_epoch_end=auc_callback(model, validation)),
                             keras.callbacks.ReduceLROnPlateau(verbose=1, monitor='loss'),
-                            keras.callbacks.TensorBoard(
-                                log_dir='../tensorboard/{}'.format(model_name))],
-                        epochs=20, verbose=0)
+                            keras.callbacks.TensorBoard(log_dir='../tensorboard/{}'.format(model_name))
+                        ],
+                        epochs=20, verbose=2)
     model.save('../models/{}.h5'.format(model_name))
     return model, model_name
 
 
-def one_vs_all_validation():
-    pred = np.zeros(279)
-    for i in tqdm.trange(279):
-        model = global_model((n_resnet_features,),
-                             keras.Sequential((
-                                 Dropout(.5),
-                                 Dense(8),
-                                 LeakyReLU(),
-                                 Dropout(.5),
-                                 Dense(16),
-                                 LeakyReLU(),
-                                 Dropout(.5),
-                                 Dense(32),
-                                 LeakyReLU(),
-                                 Dropout(.5),
-                                 Dense(1),
-                             ), name='local_model')
-                             )
-        model.compile(keras.optimizers.Adam(lr=2e-3, decay=1e-3),
-                      loss=dict(
-                          prediction=annotation_criterion,
-                          tile_predictions=annotation_criterion
-                      ),
-                      loss_weights=dict(
-                          prediction=1,
-                          tile_predictions=1e1
-                      )
-                      )
+def cross_val():
+    n = 279
+    batch_size = 30
 
-        train, validation = dataloading.train_loader('../data/train', one_vs_all=1,
+    pred = np.zeros(n)
+
+    for i in tqdm.trange(n // batch_size):
+        indices = np.arange(i, n, n // batch_size)
+        train, validation = dataloading.train_loader('../data/train',
+                                                     cross_val=indices,
                                                      train_batch_size=8, validation_batch_size=1)
+
+        model = make_model(train.label_ratio, train.annotation_ratio)
 
         model.fit_generator(train,
                             callbacks=[
                                 keras.callbacks.ReduceLROnPlateau(verbose=0, monitor='loss')],
                             epochs=20, verbose=0)
 
-        pred[i], _ = model.predict_generator(validation)
-        pred[i] = 1 / (1 + np.exp(-pred[i]))
+        pred[indices] = model.predict_generator(validation)[0].reshape(-1)
+        pred[indices] = 1 / (1 + np.exp(-pred[indices]))
+        np.save('../tmp_pred', pred)
+
     train, _ = dataloading.train_loader('../data/train', train_batch_size=512)
     print(roc_auc_score(train.labels, pred))
 
 
 if __name__ == '__main__':
     predict_test(*train_model())
-    # one_vs_all_validation()
+    # cross_val()
