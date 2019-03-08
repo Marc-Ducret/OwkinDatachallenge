@@ -10,6 +10,7 @@ import os
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 import tqdm
+import tensorflow as tf
 
 
 def Sum(axis, keepdims=False):
@@ -33,20 +34,22 @@ def global_model(tile_shape, local_model):
     tile_predictions = Reshape((n_tiles,))(local_model_output)
     tile_predictions = Multiply(name='tile_predictions')([tile_predictions, masks])
 
-    prediction = Dense(1, name='prediction', kernel_initializer='ones')(
+    sorted_predictions = Lambda(lambda x: tf.nn.top_k(x, n_tiles, sorted=True).values)(tile_predictions)
 
-        Multiply()([
-            Sum(axis=1, keepdims=True)(
-                Multiply()([
-                    keras.Sequential(layers=(
-                        Dense(1, activation='relu', kernel_initializer='ones'),
-                        Dropout(.1),
-                    ))(local_model_output),
-                    Reshape((n_tiles, 1))(masks)
-                ])
-            ),
-            Power(-1)(Sum(axis=1, keepdims=True)(masks))
-        ])
+    prediction = Dense(1, name='prediction', kernel_initializer=keras.initializers.Constant(1 / n_tiles))(
+        sorted_predictions
+        # Multiply()([
+        #     Sum(axis=1, keepdims=True)(
+        #         Multiply()([
+        #             keras.Sequential(layers=(
+        #                 Dense(1, kernel_initializer='ones'),
+        #                 # Dropout(.01),
+        #             ))(local_model_output),
+        #             Reshape((n_tiles, 1))(masks)
+        #         ])
+        #     ),
+        #     Power(-1)(Sum(axis=1, keepdims=True)(masks))
+        # ])
     )
 
     return keras.Model(inputs=[tiles, masks], outputs=[prediction, tile_predictions])
@@ -89,31 +92,31 @@ def auc_callback(model, validation):
 def make_model(label_ratio, annotation_ratio):
     model = global_model((n_resnet_features,),
                          keras.Sequential((
-                             Dropout(.5),
-                             Dense(8),
-                             LeakyReLU(.01),
-                             Dropout(.5),
-                             Dense(16),
-                             LeakyReLU(.01),
-                             Dropout(.5),
-                             Dense(32),
-                             LeakyReLU(.01),
-                             Dropout(.5),
+                             # Dropout(.5),
+                             # Dense(64, activation='tanh', kernel_initializer='glorot_uniform'),
+                             # LeakyReLU(.01),
+                             # Dropout(.1),
+                             Dense(8, activation='tanh', kernel_initializer='glorot_uniform'),
+                             Dense(32, activation='tanh', kernel_initializer='glorot_uniform'),
+                             # LeakyReLU(.01),
+                             # Dense(64, kernel_initializer='glorot_uniform'),
+                             # LeakyReLU(.01),
+                             # Dropout(.1),
                              # Dense(32),
                              # LeakyReLU(.01),
                              # Dropout(.5),
-                             Dense(1),
+                             Dense(1, kernel_initializer='glorot_uniform'),
                          ), name='local_model')
                          )
 
-    model.compile(keras.optimizers.Adam(lr=2e-3, decay=1e-3),
+    model.compile(keras.optimizers.Adam(lr=10e-4, decay=1e-3),
                   loss=dict(
                       prediction=balanced_criterion(label_ratio),
                       tile_predictions=balanced_criterion(annotation_ratio)
                   ),
                   loss_weights=dict(
                       prediction=1,
-                      tile_predictions=5e1
+                      tile_predictions=20
                   ),
                   metrics=dict(
                       prediction=[],
@@ -125,9 +128,9 @@ def make_model(label_ratio, annotation_ratio):
 
 def train_model():
     train, validation = dataloading.train_loader('../data/train',
-                                                 validation_ratio=.2,
+                                                 validation_ratio=0,
                                                  # cross_val=hard_samples,
-                                                 train_batch_size=8, validation_batch_size=512)
+                                                 train_batch_size=16, validation_batch_size=512)
 
     model = make_model(train.label_ratio, train.annotation_ratio)
     model.summary()
