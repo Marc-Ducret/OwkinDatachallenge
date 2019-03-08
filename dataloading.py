@@ -1,11 +1,12 @@
 import numpy as np
 import pandas as pd
 import os
-import tqdm
 import parse
 import keras
+import tqdm
 from constants import *
-# from PIL import Image
+from PIL import Image
+from concurrent.futures import ThreadPoolExecutor as Executor
 
 
 def time(f, *args, **kwargs):
@@ -43,8 +44,35 @@ def load_resnet_features(folder, ids, annotated):
     return features, mask
 
 
-def load_images(folder, ids, annotated):
-    pass  # TODO
+def process_files(folder, files):
+    tile_ids = np.zeros(files.size, dtype=int)
+    images = np.zeros((files.size,) + image_shape)
+    for i, file in enumerate(files):
+        _, _, tile_id, _ = parse.parse('ID_{:03d}_{}_{:d}_{}.jpg', file)
+
+        image = Image.open('{}/{}'.format(folder, file))
+        # TODO data augmentation
+        tile_ids[i] = tile_id
+        images[i] = np.array(image)
+
+    return tile_ids, images
+
+
+def load_images(folder, ids, annotated, executor):
+    data = np.zeros(ids.shape + (n_tiles,) + image_shape)
+    mask = np.zeros(ids.shape + (n_tiles,), dtype=bool)
+    for i, id in enumerate(ids):
+        local_folder = '{}/images/ID_{:03d}{}'.format(folder, id, '_annotated' if annotated[i] else '')
+
+        files = np.array(os.listdir(local_folder))
+        for tile_ids, images in executor.map(
+                process_files,
+                [local_folder] * image_loading_split,
+                [files[np.arange(i, files.size, image_loading_split)] for i in range(image_loading_split)]):
+            data[i][tile_ids] = images
+            mask[i][tile_ids] = 1
+
+    return data, mask
 
 
 def load_labels(folder, ids):
@@ -69,7 +97,6 @@ def load_tile_annotations(folder, reverse_ids, annotated):
 
 
 class DataLoader(keras.utils.Sequence):
-    # TODO implement image loading
     def __init__(self, folder, ids, annotated, labels=None, annotations=None, batch_size=32,
                  preload=False, shuffle=False, image=False):
         self.folder = folder
@@ -92,6 +119,9 @@ class DataLoader(keras.utils.Sequence):
 
         self.shuffle = shuffle
         self.image = image
+        if self.image:
+            self.executor = Executor(max_workers=image_loading_workers)
+
         self.permutation = np.arange(len(self.ids))
         self.on_epoch_end()
 
@@ -99,10 +129,11 @@ class DataLoader(keras.utils.Sequence):
         return (len(self.ids)+self.batch_size-1) // self.batch_size
 
     def __getitem__(self, item):
+        print('load', item)
         select = self.permutation[item * self.batch_size:(item+1) * self.batch_size]
 
         if self.image:
-            data, mask = load_images(self.folder, self.ids[select], self.annotated[select])
+            data, mask = load_images(self.folder, self.ids[select], self.annotated[select], self.executor)
         else:
             if self.preload:
                 data, mask = self.features[select], self.masks[select]
@@ -120,7 +151,7 @@ class DataLoader(keras.utils.Sequence):
 
 
 def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, cross_val=None,
-                 train_batch_size=32, validation_batch_size=32, shuffle_train=True):
+                 train_batch_size=32, validation_batch_size=32, shuffle_train=True, image=False):
 
     ids, annotated, reverse_ids = explore_dataset(folder)
 
@@ -169,14 +200,20 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, cross
     return (
         DataLoader(folder, ids[train_select], annotated[train_select],
                    labels[train_select], annotations[train_select], batch_size=train_batch_size,
-                   preload=False, shuffle=shuffle_train),
+                   preload=False, image=image, shuffle=shuffle_train),
         DataLoader(folder, ids[validation_select], annotated[validation_select],
                    labels[validation_select], annotations[validation_select], batch_size=validation_batch_size,
-                   preload=False)
+                   preload=False, image=image)
         if validation_select.size > 0 else None,
     )
 
 
 def test_loader(folder, batch_size):
     ids, annotated, reverse_ids = explore_dataset(folder)
-    return DataLoader(folder, ids, annotated, batch_size=batch_size)
+    loader = DataLoader(folder, ids, annotated, batch_size=batch_size, image=True)
+    for i in tqdm.trange(len(loader)):
+        _ = loader[i]
+
+
+if __name__ == '__main__':
+    test_loader('../data/train', 1)

@@ -30,33 +30,20 @@ def global_model(tile_shape, local_model):
     tiles = Input(shape=(n_tiles,) + tile_shape)
     masks = Input(shape=(n_tiles,))
 
-    local_model_output = local_model(tiles)
-    tile_predictions = Reshape((n_tiles,))(local_model_output)
+    local_model_output = local_model(Lambda(lambda x: K.reshape(x, (-1,) + tile_shape))(tiles))
+    tile_predictions = Lambda(lambda x: K.reshape(x, (-1, n_tiles)))(local_model_output)
     tile_predictions = Multiply(name='tile_predictions')([tile_predictions, masks])
 
-    sorted_predictions = Lambda(lambda x: tf.nn.top_k(x, n_tiles, sorted=True).values)(tile_predictions)
+    sorted_predictions = Lambda(lambda x: tf.nn.top_k(x, n_tiles // 50, sorted=True).values)(tile_predictions)
 
-    prediction = Dense(1, name='prediction', kernel_initializer=keras.initializers.Constant(1 / n_tiles))(
+    prediction = Dense(1, name='prediction', kernel_initializer=keras.initializers.Constant(1 / (n_tiles // 50)))(
         sorted_predictions
-        # Multiply()([
-        #     Sum(axis=1, keepdims=True)(
-        #         Multiply()([
-        #             keras.Sequential(layers=(
-        #                 Dense(1, kernel_initializer='ones'),
-        #                 # Dropout(.01),
-        #             ))(local_model_output),
-        #             Reshape((n_tiles, 1))(masks)
-        #         ])
-        #     ),
-        #     Power(-1)(Sum(axis=1, keepdims=True)(masks))
-        # ])
     )
 
     return keras.Model(inputs=[tiles, masks], outputs=[prediction, tile_predictions])
 
 
 def balanced_criterion(ratio):
-
     def criterion(target, pred):
         valid = K.cast(K.greater_equal(target, 0), float)
         return 2 * K.abs(target - ratio) * K.binary_crossentropy(target * valid, pred * valid - 1e10 * (1 - valid),
@@ -89,15 +76,15 @@ def auc_callback(model, validation):
     return compute_auc
 
 
-def make_model(label_ratio, annotation_ratio):
+def make_model_features(label_ratio, annotation_ratio):
     model = global_model((n_resnet_features,),
                          keras.Sequential((
                              # Dropout(.5),
                              # Dense(64, activation='tanh', kernel_initializer='glorot_uniform'),
                              # LeakyReLU(.01),
                              # Dropout(.1),
-                             Dense(8, activation='tanh', kernel_initializer='glorot_uniform'),
-                             Dense(32, activation='tanh', kernel_initializer='glorot_uniform'),
+                             # Dense(32, activation='tanh', kernel_initializer='glorot_uniform'),
+                             # Dense(64, activation='tanh', kernel_initializer='glorot_uniform'),
                              # LeakyReLU(.01),
                              # Dense(64, kernel_initializer='glorot_uniform'),
                              # LeakyReLU(.01),
@@ -109,14 +96,56 @@ def make_model(label_ratio, annotation_ratio):
                          ), name='local_model')
                          )
 
-    model.compile(keras.optimizers.Adam(lr=10e-4, decay=1e-3),
+    model.compile(keras.optimizers.Adam(lr=1e-1, decay=1e1),
                   loss=dict(
                       prediction=balanced_criterion(label_ratio),
                       tile_predictions=balanced_criterion(annotation_ratio)
                   ),
                   loss_weights=dict(
                       prediction=1,
-                      tile_predictions=20
+                      tile_predictions=10
+                  ),
+                  metrics=dict(
+                      prediction=[],
+                      tile_predictions=[]
+                  )
+                  )
+    return model
+
+
+def make_model_image(label_ratio, annotation_ratio):
+    model = global_model(image_shape,
+                         # keras.applications.mobilenet_v2.MobileNetV2(weights=None, classes=1)
+                         keras.Sequential((
+                             Conv2D(4, 3, activation='relu'),
+                             Conv2D(4, 3, activation='relu'),
+                             MaxPool2D(2),
+                             Conv2D(4, 3, activation='relu'),
+                             Conv2D(4, 3, activation='relu'),
+                             MaxPool2D(2),
+                             Conv2D(4, 3, activation='relu'),
+                             Conv2D(4, 3, activation='relu'),
+                             MaxPool2D(2),
+                             Conv2D(4, 3, activation='relu'),
+                             Conv2D(4, 3, activation='relu'),
+                             MaxPool2D(2),
+                             Conv2D(4, 3, activation='relu'),
+                             Conv2D(4, 3, activation='relu'),
+                             MaxPool2D(2),
+                             Flatten(),
+                             Dense(1)
+                         ), name='local_model'
+                         )
+    )
+
+    model.compile(keras.optimizers.Adam(lr=1e-1, decay=1e1),
+                  loss=dict(
+                      prediction=balanced_criterion(label_ratio),
+                      tile_predictions=balanced_criterion(annotation_ratio)
+                  ),
+                  loss_weights=dict(
+                      prediction=1,
+                      tile_predictions=10
                   ),
                   metrics=dict(
                       prediction=[],
@@ -128,15 +157,16 @@ def make_model(label_ratio, annotation_ratio):
 
 def train_model():
     train, validation = dataloading.train_loader('../data/train',
-                                                 validation_ratio=0,
+                                                 validation_ratio=.2,
                                                  # cross_val=hard_samples,
-                                                 train_batch_size=16, validation_batch_size=512)
+                                                 train_batch_size=1, validation_batch_size=1,
+                                                 image=True)
 
-    model = make_model(train.label_ratio, train.annotation_ratio)
+    model = make_model_image(train.label_ratio, train.annotation_ratio)
     model.summary()
 
     model_name = 'model_{:02d}'.format(len(os.listdir('../tensorboard')))
-    model.fit_generator(train, validation_data=validation,
+    model.fit_generator(train,  # validation_data=validation,
                         callbacks=[
                             keras.callbacks.LambdaCallback(on_epoch_end=auc_callback(model, validation)),
                             keras.callbacks.ReduceLROnPlateau(verbose=1, monitor='loss'),
@@ -159,7 +189,7 @@ def cross_val():
                                                      cross_val=indices,
                                                      train_batch_size=8, validation_batch_size=1)
 
-        model = make_model(train.label_ratio, train.annotation_ratio)
+        model = make_model_image(train.label_ratio, train.annotation_ratio)
 
         model.fit_generator(train,
                             callbacks=[
