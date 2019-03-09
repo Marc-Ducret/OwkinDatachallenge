@@ -98,7 +98,7 @@ def load_tile_annotations(folder, reverse_ids, annotated):
 
 class DataLoader(keras.utils.Sequence):
     def __init__(self, folder, ids, annotated, labels=None, annotations=None, batch_size=32,
-                 preload=False, shuffle=False, image=False):
+                 preload=False, shuffle=False, image=False, pairs=False):
         self.folder = folder
         self.ids = ids
         self.annotated = annotated
@@ -115,42 +115,66 @@ class DataLoader(keras.utils.Sequence):
 
         self.preload = preload
         if self.preload:
+            assert not image
             self.features, self.masks = load_resnet_features(folder, ids, annotated)
 
         self.shuffle = shuffle
+
         self.image = image
         if self.image:
             self.executor = Executor(max_workers=image_loading_workers)
 
-        self.permutation = np.arange(len(self.ids))
+        self.permutation = np.arange(self.ids.size)
+
+        self.pairs = pairs
+        if self.pairs:
+            assert labels is not None
+            self.negative = self.permutation[self.labels == 0]
+            self.positive = self.permutation[self.labels == 1]
+
         self.on_epoch_end()
 
     def __len__(self):
-        return (len(self.ids)+self.batch_size-1) // self.batch_size
+        if self.pairs:
+            return min(self.negative.size, self.positive.size) // self.batch_size
+        else:
+            return (self.ids.size+self.batch_size-1) // self.batch_size
 
     def __getitem__(self, item):
-        select = self.permutation[item * self.batch_size:(item+1) * self.batch_size]
-
-        if self.image:
-            data, mask = load_images(self.folder, self.ids[select], self.annotated[select], self.executor)
-        else:
-            if self.preload:
-                data, mask = self.features[select], self.masks[select]
+        def load(sel):
+            if self.image:
+                return load_images(self.folder, self.ids[sel], self.annotated[sel], self.executor)
             else:
-                data, mask = load_resnet_features(self.folder, self.ids[select], self.annotated[select])
+                if self.preload:
+                    return self.features[sel], self.masks[sel]
+                else:
+                    return load_resnet_features(self.folder, self.ids[sel], self.annotated[sel])
+
+        if self.pairs:
+            select_positive = self.positive[item * self.batch_size:(item+1) * self.batch_size]
+            select_negative = self.negative[item * self.batch_size:(item+1) * self.batch_size]
+
+            select = np.concatenate((select_positive, select_negative))
+
+        else:
+            select = self.permutation[item * self.batch_size:(item+1) * self.batch_size]
 
         if self.labels is not None:
-            return [data, mask], [self.labels[select], self.annotations[select]]
+            return list(load(select)), [self.labels[select], self.annotations[select]]
         else:
-            return [data, mask]
+            return list(load(select))
 
     def on_epoch_end(self):
         if self.shuffle:
-            np.random.shuffle(self.permutation)
+            if self.pairs:
+                np.random.shuffle(self.positive)
+                np.random.shuffle(self.negative)
+            else:
+                np.random.shuffle(self.permutation)
 
 
 def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, cross_val=None,
-                 train_batch_size=32, validation_batch_size=32, shuffle_train=True, image=False):
+                 train_batch_size=32, validation_batch_size=32, shuffle_train=True, image=False, pairs=False):
 
     ids, annotated, reverse_ids = explore_dataset(folder)
 
@@ -167,7 +191,7 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, cross
                 validation_select.append(i)
             else:
                 train_select.append(i)
-    else:
+    else:  # TODO balanced validation set?
         validation_count = int(validation_ratio * ids.size)
         validation_annotated_count = int(validation_annotated_ratio * ids.size)
 
@@ -199,7 +223,7 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, cross
     return (
         DataLoader(folder, ids[train_select], annotated[train_select],
                    labels[train_select], annotations[train_select], batch_size=train_batch_size,
-                   preload=False, image=image, shuffle=shuffle_train),
+                   preload=False, image=image, shuffle=shuffle_train, pairs=pairs),
         DataLoader(folder, ids[validation_select], annotated[validation_select],
                    labels[validation_select], annotations[validation_select], batch_size=validation_batch_size,
                    preload=False, image=image)
@@ -211,4 +235,3 @@ def test_loader(folder, batch_size, image=False):
     ids, annotated, reverse_ids = explore_dataset(folder)
     loader = DataLoader(folder, ids, annotated, batch_size=batch_size, image=image)
     return loader
-
