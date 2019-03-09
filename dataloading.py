@@ -129,7 +129,6 @@ class DataLoader(keras.utils.Sequence):
         return (len(self.ids)+self.batch_size-1) // self.batch_size
 
     def __getitem__(self, item):
-        print('load', item)
         select = self.permutation[item * self.batch_size:(item+1) * self.batch_size]
 
         if self.image:
@@ -208,12 +207,8 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, cross
     )
 
 
-def test_loader(folder, batch_size):
+def test_loader(folder, batch_size, image=False):
     ids, annotated, reverse_ids = explore_dataset(folder)
-    loader = DataLoader(folder, ids, annotated, batch_size=batch_size, image=True)
-    for i in tqdm.trange(len(loader)):
-        _ = loader[i]
+    loader = DataLoader(folder, ids, annotated, batch_size=batch_size, image=image)
+    return loader
 
-
-if __name__ == '__main__':
-    test_loader('../data/train', 1)
