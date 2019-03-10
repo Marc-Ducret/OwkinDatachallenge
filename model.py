@@ -143,7 +143,7 @@ def train_model(image, pairs):
         '../data/train',
         validation_ratio=0,
         # cross_val=hard_samples,
-        train_batch_size=1 if image else 16, validation_batch_size=1 if image else 512,
+        train_batch_size=1 if image else 32, validation_batch_size=1 if image else 512,
         image=image,
         pairs=pairs
     )
@@ -182,9 +182,9 @@ def train_model(image, pairs):
     return model, model_name
 
 
-def cross_val():  # TODO correct
+def cross_val(image, pairs):
     n = 279
-    batch_size = 30
+    batch_size = 1
 
     pred = np.zeros(n)
 
@@ -193,15 +193,35 @@ def cross_val():  # TODO correct
         train, validation = dataloading.train_loader(
             '../data/train',
             cross_val=indices,
-            train_batch_size=8, validation_batch_size=1)
+            train_batch_size=1 if image else 32, validation_batch_size=1 if image else 512,
+            image=image,
+            pairs=pairs
+        )
 
-        model = make_model_image()
+        model = make_model_image() if image else make_model_features()
+
+        model.compile(
+            keras.optimizers.Adam(lr=1e-4 if image else 1e-2, decay=0 if image else 1e-1),
+            loss=dict(
+                prediction=rank_criterion() if pairs else balanced_criterion(train.label_ratio),
+                tile_predictions=balanced_criterion(train.annotation_ratio)
+            ),
+            loss_weights=dict(
+                prediction=1,
+                tile_predictions=10
+            ),
+            metrics=dict(
+                prediction=[],
+                tile_predictions=[]
+            )
+        )
 
         model.fit_generator(
             train,
             callbacks=[
                 keras.callbacks.ReduceLROnPlateau(verbose=0, monitor='loss')],
-            epochs=20, verbose=0)
+            epochs=20, verbose=0
+        )
 
         pred[indices] = model.predict_generator(validation)[0].reshape(-1)
         pred[indices] = 1 / (1 + np.exp(-pred[indices]))
@@ -213,4 +233,4 @@ def cross_val():  # TODO correct
 
 if __name__ == '__main__':
     predict_test(*train_model(image=False, pairs=True))
-    # cross_val()
+    # cross_val(image=False, pairs=True)
