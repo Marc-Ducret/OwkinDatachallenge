@@ -41,7 +41,7 @@ def global_model(tile_shape, local_model):
     #     sorted_predictions
     # )
 
-    prediction = Dense(1, name='prediction', kernel_initializer='glorot_uniform')(
+    prediction = Dense(1, name='prediction', kernel_initializer=keras.initializers.Constant(1 / n_resnet_features))(
         Sum(axis=1, keepdims=True)(Multiply()([
             tiles,
             Reshape((n_tiles, 1))(Activation('softmax')(tile_predictions))
@@ -54,8 +54,7 @@ def global_model(tile_shape, local_model):
 def balanced_criterion(ratio):
     def criterion(target, pred):
         valid = K.cast(K.greater_equal(target, 0), float)
-        return 2 * K.abs(target - ratio) * K.binary_crossentropy(target * valid, pred * valid - 1e10 * (1 - valid),
-                                                                 from_logits=True)
+        return 2 * K.abs(target - ratio) * K.binary_crossentropy(target * valid, pred * valid, from_logits=True) * valid
 
     return criterion
 
@@ -113,7 +112,7 @@ def make_model_features():
         keras.Sequential((
             # BatchNormalization(),
             # Dropout(.1),
-            Dense(1, kernel_initializer='glorot_uniform'),
+            Dense(1, kernel_initializer=keras.initializers.Constant(1 / n_resnet_features)),
         ), name='local_model')
     )
 
@@ -165,7 +164,7 @@ def compile_model(model, train, image, pairs):
         ),
         loss_weights=dict(
             prediction=1,
-            tile_predictions=10
+            tile_predictions=3
         ),
         metrics=dict(
             prediction=[],
