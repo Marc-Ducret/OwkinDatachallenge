@@ -34,11 +34,18 @@ def global_model(tile_shape, local_model):
     tile_predictions = Lambda(lambda x: K.reshape(x, (-1, n_tiles)))(local_model_output)
     tile_predictions = Multiply(name='tile_predictions')([tile_predictions, masks])
 
-    n_select = 5
-    sorted_predictions = Lambda(lambda x: tf.nn.top_k(x, n_select, sorted=True).values)(tile_predictions)
+    # n_select = 5
+    # sorted_predictions = Lambda(lambda x: tf.nn.top_k(x, n_select, sorted=True).values)(tile_predictions)
+    #
+    # prediction = Dense(1, name='prediction', kernel_initializer=keras.initializers.Constant(1 / n_select))(
+    #     sorted_predictions
+    # )
 
-    prediction = Dense(1, name='prediction', kernel_initializer=keras.initializers.Constant(1 / n_select))(
-        sorted_predictions
+    prediction = Dense(1, name='prediction', kernel_initializer='glorot_uniform')(
+        Sum(axis=1, keepdims=True)(Multiply()([
+            tiles,
+            Reshape((n_tiles, 1))(Activation('softmax')(tile_predictions))
+        ]))
     )
 
     return keras.Model(inputs=[tiles, masks], outputs=[prediction, tile_predictions])
@@ -104,8 +111,8 @@ def make_model_features():
     model = global_model(
         (n_resnet_features,),
         keras.Sequential((
-            BatchNormalization(),
-            Dropout(.5),
+            # BatchNormalization(),
+            # Dropout(.1),
             Dense(1, kernel_initializer='glorot_uniform'),
         ), name='local_model')
     )
@@ -138,21 +145,18 @@ def make_model_image():
     return model
 
 
-def train_model(image, pairs):
-    train, validation = dataloading.train_loader(
+def train_loader(validation_ratio=0., cross_val=None, image=False, pairs=False):
+    return dataloading.train_loader(
         '../data/train',
-        validation_ratio=0,
-        # cross_val=hard_samples,
+        validation_ratio=validation_ratio,
+        cross_val=cross_val,
         train_batch_size=1 if image else 32, validation_batch_size=1 if image else 512,
         image=image,
         pairs=pairs
     )
 
-    model = make_model_image() if image else make_model_features()
-    model.summary()
 
-    model_name = 'model_{:03d}'.format(len(os.listdir('../tensorboard')))
-
+def compile_model(model, train, image, pairs):
     model.compile(
         keras.optimizers.Adam(lr=1e-4 if image else 1e-2, decay=0 if image else 1e-1),
         loss=dict(
@@ -169,6 +173,17 @@ def train_model(image, pairs):
         )
     )
 
+
+def train_model(image, pairs):
+    train, validation = train_loader(validation_ratio=0, image=image, pairs=pairs)
+
+    model = make_model_image() if image else make_model_features()
+    model.summary()
+
+    model_name = 'model_{:03d}'.format(len(os.listdir('../tensorboard')))
+
+    compile_model(model, train, image, pairs)
+
     model.fit_generator(
         train,
         callbacks=[
@@ -184,37 +199,17 @@ def train_model(image, pairs):
 
 def cross_val(image, pairs):
     n = 279
-    batch_size = 1
+    batch_size = 15
 
     pred = np.zeros(n)
 
     for i in tqdm.trange(n // batch_size):
         indices = np.arange(i, n, n // batch_size)
-        train, validation = dataloading.train_loader(
-            '../data/train',
-            cross_val=indices,
-            train_batch_size=1 if image else 32, validation_batch_size=1 if image else 512,
-            image=image,
-            pairs=pairs
-        )
+        train, validation = train_loader(cross_val=indices, image=image, pairs=pairs)
 
         model = make_model_image() if image else make_model_features()
 
-        model.compile(
-            keras.optimizers.Adam(lr=1e-4 if image else 1e-2, decay=0 if image else 1e-1),
-            loss=dict(
-                prediction=rank_criterion() if pairs else balanced_criterion(train.label_ratio),
-                tile_predictions=balanced_criterion(train.annotation_ratio)
-            ),
-            loss_weights=dict(
-                prediction=1,
-                tile_predictions=10
-            ),
-            metrics=dict(
-                prediction=[],
-                tile_predictions=[]
-            )
-        )
+        compile_model(model, train, image, pairs)
 
         model.fit_generator(
             train,
