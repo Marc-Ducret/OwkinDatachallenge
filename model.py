@@ -41,9 +41,13 @@ def global_model(tile_shape, local_model):
     #     sorted_predictions
     # )
 
-    prediction = Dense(1, name='prediction', kernel_initializer=keras.initializers.Constant(1 / n_resnet_features))(
+    prediction = Dense(1, name='prediction', kernel_initializer='glorot_uniform') (
         Sum(axis=1, keepdims=True)(Multiply()([
-            tiles,
+            keras.Sequential((
+                BatchNormalization(),
+                Dense(64, kernel_initializer='glorot_uniform', activation='tanh'),
+                BatchNormalization(),
+            ))(tiles),
             Reshape((n_tiles, 1))(Activation('softmax')(tile_predictions))
         ]))
     )
@@ -76,8 +80,8 @@ def rank_criterion():
     return criterion
 
 
-def predict_test(model, name):  # TODO handle images
-    test = dataloading.test_loader('../data/test', batch_size=512)
+def predict_test(model, data_type, name):
+    test = dataloading.test_loader('../data/test', data_type=data_type, batch_size=512)
     pred, _ = model.predict_generator(test, verbose=1)
     pred = 1 / (1 + np.exp(-pred))
     df = pd.DataFrame(dict(
@@ -106,13 +110,14 @@ def auc_callback(model, validation):
     return compute_auc
 
 
-def make_model_features():
+def make_model_features(n_f):
     model = global_model(
-        (n_resnet_features,),
+        (n_f,),
         keras.Sequential((
-            # BatchNormalization(),
-            # Dropout(.1),
-            Dense(1, kernel_initializer=keras.initializers.Constant(1 / n_resnet_features)),
+            BatchNormalization(),
+            Dense(128, kernel_initializer='glorot_uniform', activation='tanh'),
+            BatchNormalization(),
+            Dense(1, kernel_initializer='glorot_uniform'),
         ), name='local_model')
     )
 
@@ -144,27 +149,47 @@ def make_model_image():
     return model
 
 
-def train_loader(validation_ratio=0., cross_val=None, image=False, pairs=False):
+def train_loader(validation_ratio=0., cross_val=None, data_type='resnet_features', pairs=False):
+    train_batch_size = dict(
+        resnet_features=32,
+        pca=64,
+        image=1
+    )
+    validation_batch_size = dict(
+        resnet_features=512,
+        pca=512,
+        image=1
+    )
     return dataloading.train_loader(
         '../data/train',
         validation_ratio=validation_ratio,
         cross_val=cross_val,
-        train_batch_size=1 if image else 32, validation_batch_size=1 if image else 512,
-        image=image,
+        train_batch_size=train_batch_size[data_type], validation_batch_size=validation_batch_size[data_type],
+        data_type=data_type,
         pairs=pairs
     )
 
 
-def compile_model(model, train, image, pairs):
+def compile_model(model, train, data_type, pairs):
+    lr = dict(
+        resnet_features=1e-2,
+        pca=1e-2,
+        image=1e-4
+    )
+    decay = dict(
+        resnet_features=1e-1,
+        pca=1e-5,
+        image=0
+    )
     model.compile(
-        keras.optimizers.Adam(lr=1e-4 if image else 1e-2, decay=0 if image else 1e-1),
+        keras.optimizers.Adam(lr=lr[data_type], decay=decay[data_type]),
         loss=dict(
             prediction=rank_criterion() if pairs else balanced_criterion(train.label_ratio),
             tile_predictions=balanced_criterion(train.annotation_ratio)
         ),
         loss_weights=dict(
             prediction=1,
-            tile_predictions=3
+            tile_predictions=2
         ),
         metrics=dict(
             prediction=[],
@@ -173,15 +198,15 @@ def compile_model(model, train, image, pairs):
     )
 
 
-def train_model(image, pairs):
-    train, validation = train_loader(validation_ratio=0, image=image, pairs=pairs)
+def train_model(data_type, pairs):
+    train, validation = train_loader(validation_ratio=0, data_type=data_type, pairs=pairs)
 
-    model = make_model_image() if image else make_model_features()
+    model = make_model_image() if data_type == 'image' else make_model_features(n_features[data_type])
     model.summary()
 
     model_name = 'model_{:03d}'.format(len(os.listdir('../tensorboard')))
 
-    compile_model(model, train, image, pairs)
+    compile_model(model, train, data_type, pairs)
 
     model.fit_generator(
         train,
@@ -190,13 +215,13 @@ def train_model(image, pairs):
             keras.callbacks.ReduceLROnPlateau(verbose=1, monitor='loss'),
             keras.callbacks.TensorBoard(log_dir='../tensorboard/{}'.format(model_name))
         ],
-        epochs=20, verbose=1
+        epochs=100, verbose=1
     )
     model.save('../models/{}.h5'.format(model_name))
-    return model, model_name
+    return model, data_type, model_name
 
 
-def cross_val(image, pairs):
+def cross_val(data_type, pairs):
     n = 279
     batch_size = 15
 
@@ -204,17 +229,17 @@ def cross_val(image, pairs):
 
     for i in tqdm.trange(n // batch_size):
         indices = np.arange(i, n, n // batch_size)
-        train, validation = train_loader(cross_val=indices, image=image, pairs=pairs)
+        train, validation = train_loader(cross_val=indices, data_type=data_type, pairs=pairs)
 
-        model = make_model_image() if image else make_model_features()
+        model = make_model_image() if data_type == 'image' else make_model_features(n_features[data_type])
 
-        compile_model(model, train, image, pairs)
+        compile_model(model, train, data_type, pairs)
 
         model.fit_generator(
             train,
             callbacks=[
                 keras.callbacks.ReduceLROnPlateau(verbose=0, monitor='loss')],
-            epochs=20, verbose=0
+            epochs=100, verbose=0
         )
 
         pred[indices] = model.predict_generator(validation)[0].reshape(-1)
@@ -226,5 +251,9 @@ def cross_val(image, pairs):
 
 
 if __name__ == '__main__':
-    predict_test(*train_model(image=False, pairs=True))
-    # cross_val(image=False, pairs=True)
+    def _scope():
+        data_type = 'pca'
+        pairs = True
+        predict_test(*train_model(data_type=data_type, pairs=pairs))
+        # cross_val(data_type=data_type, pairs=pairs)
+    _scope()

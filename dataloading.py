@@ -3,7 +3,6 @@ import pandas as pd
 import os
 import parse
 import keras
-import tqdm
 from constants import *
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor as Executor
@@ -32,12 +31,17 @@ def explore_dataset(folder):
 
 
 def load_resnet_features(folder, ids, annotated):
-    features = np.zeros(ids.shape + (n_tiles, n_resnet_features))
+    return load_features(folder, 'resnet_features', ids, annotated)
+
+
+def load_features(folder, data_type, ids, annotated):
+    assert data_type in n_features
+    features = np.zeros(ids.shape + (n_tiles, n_features[data_type]))
     mask = np.zeros(ids.shape + (n_tiles,), dtype=bool)
 
     for i in range(ids.shape[0]):
-        file = '{}/resnet_features/ID_{:03d}{}.npy'.format(folder, ids[i], '_annotated' if annotated[i] else '')
-        loaded = np.load(file)[:, -n_resnet_features:]
+        file = '{}/{}/ID_{:03d}{}.npy'.format(folder, data_type, ids[i], '_annotated' if annotated[i] else '')
+        loaded = np.load(file)[:, -n_features[data_type]:]
         features[i, :loaded.shape[0]] = loaded
         mask[i, :loaded.shape[0]] = 1
 
@@ -98,13 +102,14 @@ def load_tile_annotations(folder, reverse_ids, annotated):
 
 class DataLoader(keras.utils.Sequence):
     def __init__(self, folder, ids, annotated, labels=None, annotations=None, batch_size=32,
-                 preload=False, shuffle=False, image=False, pairs=False):
+                 preload=False, shuffle=False, data_type='resnet_features', pairs=False):
         self.folder = folder
         self.ids = ids
         self.annotated = annotated
         self.batch_size = batch_size
         self.labels = labels
         self.annotations = annotations
+        assert data_type in ['resnet_features', 'pca', 'image']
 
         if labels is not None:
             self.label_ratio = (labels == 1).sum() / (labels >= 0).sum()
@@ -115,13 +120,13 @@ class DataLoader(keras.utils.Sequence):
 
         self.preload = preload
         if self.preload:
-            assert not image
-            self.features, self.masks = load_resnet_features(folder, ids, annotated)
+            assert data_type != 'image'
+            self.features, self.masks = load_features(folder, data_type, ids, annotated)
 
         self.shuffle = shuffle
 
-        self.image = image
-        if self.image:
+        self.data_type = data_type
+        if self.data_type == 'image':
             self.executor = Executor(max_workers=image_loading_workers)
 
         self.permutation = np.arange(self.ids.size)
@@ -142,13 +147,13 @@ class DataLoader(keras.utils.Sequence):
 
     def __getitem__(self, item):
         def load(sel):
-            if self.image:
+            if self.data_type == 'image':
                 return load_images(self.folder, self.ids[sel], self.annotated[sel], self.executor)
             else:
                 if self.preload:
                     return self.features[sel], self.masks[sel]
                 else:
-                    return load_resnet_features(self.folder, self.ids[sel], self.annotated[sel])
+                    return load_features(self.folder, self.data_type, self.ids[sel], self.annotated[sel])
 
         if self.pairs:
             select_positive = self.positive[item * self.batch_size:(item+1) * self.batch_size]
@@ -174,7 +179,8 @@ class DataLoader(keras.utils.Sequence):
 
 
 def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, cross_val=None,
-                 train_batch_size=32, validation_batch_size=32, shuffle_train=True, image=False, pairs=False):
+                 train_batch_size=32, validation_batch_size=32, shuffle_train=True,
+                 data_type='resnet_features', pairs=False):
 
     ids, annotated, reverse_ids = explore_dataset(folder)
 
@@ -223,15 +229,15 @@ def train_loader(folder, validation_ratio=0, validation_annotated_ratio=0, cross
     return (
         DataLoader(folder, ids[train_select], annotated[train_select],
                    labels[train_select], annotations[train_select], batch_size=train_batch_size,
-                   preload=False, image=image, shuffle=shuffle_train, pairs=pairs),
+                   preload=False, data_type=data_type, shuffle=shuffle_train, pairs=pairs),
         DataLoader(folder, ids[validation_select], annotated[validation_select],
                    labels[validation_select], annotations[validation_select], batch_size=validation_batch_size,
-                   preload=False, image=image)
+                   preload=False, data_type=data_type)
         if validation_select.size > 0 else None,
     )
 
 
-def test_loader(folder, batch_size, image=False):
+def test_loader(folder, batch_size, data_type='resnet_features'):
     ids, annotated, reverse_ids = explore_dataset(folder)
-    loader = DataLoader(folder, ids, annotated, batch_size=batch_size, image=image)
+    loader = DataLoader(folder, ids, annotated, batch_size=batch_size, data_type=data_type)
     return loader
