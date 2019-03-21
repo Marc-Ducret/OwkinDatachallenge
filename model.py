@@ -41,12 +41,12 @@ def global_model(tile_shape, local_model):
     #     sorted_predictions
     # )
 
-    prediction = Dense(1, name='prediction', kernel_initializer='glorot_uniform') (
+    prediction = Dense(1, name='prediction', kernel_initializer='zeros') (
         Sum(axis=1, keepdims=True)(Multiply()([
             keras.Sequential((
-                BatchNormalization(),
-                Dense(64, kernel_initializer='glorot_uniform', activation='tanh'),
-                BatchNormalization(),
+                # BatchNormalization(),
+                # Dense(64, kernel_initializer='glorot_uniform', activation='tanh'),
+                # BatchNormalization(),
             ))(tiles),
             Reshape((n_tiles, 1))(Activation('softmax')(tile_predictions))
         ]))
@@ -114,10 +114,10 @@ def make_model_features(n_f):
     model = global_model(
         (n_f,),
         keras.Sequential((
-            BatchNormalization(),
-            Dense(128, kernel_initializer='glorot_uniform', activation='tanh'),
-            BatchNormalization(),
-            Dense(1, kernel_initializer='glorot_uniform'),
+            # BatchNormalization(),
+            # Dense(64, kernel_initializer='glorot_uniform', activation='tanh'),
+            # BatchNormalization(),
+            Dense(1, kernel_initializer='zeros'),
         ), name='local_model')
     )
 
@@ -178,7 +178,7 @@ def compile_model(model, train, data_type, pairs):
     )
     decay = dict(
         resnet_features=1e-1,
-        pca=1e-5,
+        pca=1e-1,
         image=0
     )
     model.compile(
@@ -215,7 +215,7 @@ def train_model(data_type, pairs):
             keras.callbacks.ReduceLROnPlateau(verbose=1, monitor='loss'),
             keras.callbacks.TensorBoard(log_dir='../tensorboard/{}'.format(model_name))
         ],
-        epochs=100, verbose=1
+        epochs=40, verbose=1
     )
     model.save('../models/{}.h5'.format(model_name))
     return model, data_type, model_name
@@ -239,7 +239,7 @@ def cross_val(data_type, pairs):
             train,
             callbacks=[
                 keras.callbacks.ReduceLROnPlateau(verbose=0, monitor='loss')],
-            epochs=100, verbose=0
+            epochs=40, verbose=0
         )
 
         pred[indices] = model.predict_generator(validation)[0].reshape(-1)
